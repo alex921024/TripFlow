@@ -28,12 +28,6 @@
     * **相機掃描**：整合 CameraX 與 ML Kit，實時掃描 QR Code。
     * **相簿讀取**：支援從圖庫選擇 QR Code 圖片進行匯入。
 
-## 📱 應用程式截圖 (Screenshots)
-
-| 旅程首頁 | 行程詳情 | 新增行程 | 掃描分享 |
-|:---:|:---:|:---:|:---:|
-| <img src="screenshot_home.png" width="200"/> | <img src="screenshot_detail.png" width="200"/> | <img src="screenshot_add.png" width="200"/> | <img src="screenshot_scan.png" width="200"/> |
-
 ## 🛠️ 技術棧 (Tech Stack)
 
 本專案完全採用 **Modern Android Development (MAD)** 標準構建：

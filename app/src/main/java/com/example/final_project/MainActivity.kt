@@ -8,6 +8,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -66,6 +68,7 @@ import kotlinx.serialization.json.Json
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 // --- 資料模型 ---
 @Serializable
@@ -293,24 +296,48 @@ fun TripSettingsDialog(
 ) {
     var name by remember { mutableStateOf(initialTrip?.name ?: "") }
     var selectedIcon by remember { mutableStateOf(initialTrip?.icon ?: "✈️") }
-    var dateRange by remember { mutableStateOf(initialTrip?.dateRange ?: "") }
-    var showDatePicker by remember { mutableStateOf(false) }
+
+    // 1. 解析初始日期 (如果是編輯模式)
+    val initialDates = initialTrip?.dateRange?.split(" ~ ")
+    var startDate by remember { mutableStateOf(initialDates?.getOrNull(0) ?: "") }
+    var endDate by remember { mutableStateOf(initialDates?.getOrNull(1) ?: "") }
+
+    // 2. 建立兩個獨立的顯示開關
+    var showStartPicker by remember { mutableStateOf(false) }
+    var showEndPicker by remember { mutableStateOf(false) }
 
     val icons = listOf("✈️", "🧳", "🏝️", "🏔️", "🏕️", "🏙️", "🚂", "🚗", "🚢", "🎡", "🎢", "📷", "🛍️", "🍜", "🍻")
 
-    if (showDatePicker) {
-        val datePickerState = rememberDateRangePickerState()
+    // 3. 開始日期的選取器
+    if (showStartPicker) {
+        val datePickerState = rememberDatePickerState()
         DatePickerDialog(
-            onDismissRequest = { showDatePicker = false },
+            onDismissRequest = { showStartPicker = false },
             confirmButton = {
                 TextButton(onClick = {
-                    val start = datePickerState.selectedStartDateMillis?.let { SimpleDateFormat("MM/dd", Locale.getDefault()).format(Date(it)) } ?: ""
-                    val end = datePickerState.selectedEndDateMillis?.let { SimpleDateFormat("MM/dd", Locale.getDefault()).format(Date(it)) } ?: ""
-                    if (start.isNotEmpty() && end.isNotEmpty()) dateRange = "$start ~ $end"
-                    showDatePicker = false
+                    datePickerState.selectedDateMillis?.let {
+                        startDate = SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()).format(Date(it))
+                    }
+                    showStartPicker = false
                 }) { Text("確定") }
             }
-        ) { DateRangePicker(state = datePickerState, modifier = Modifier.height(400.dp)) }
+        ) { DatePicker(state = datePickerState) }
+    }
+
+    // 4. 結束日期的選取器
+    if (showEndPicker) {
+        val datePickerState = rememberDatePickerState()
+        DatePickerDialog(
+            onDismissRequest = { showEndPicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    datePickerState.selectedDateMillis?.let {
+                        endDate = SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()).format(Date(it))
+                    }
+                    showEndPicker = false
+                }) { Text("確定") }
+            }
+        ) { DatePicker(state = datePickerState) }
     }
 
     AlertDialog(
@@ -332,19 +359,58 @@ fun TripSettingsDialog(
                     }
                 }
                 Text("📝 旅程名稱", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                OutlinedTextField(value = name, onValueChange = { name = it }, placeholder = { Text("日本東京之旅") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    placeholder = { Text("請輸入旅程...", color = Color.Gray) },
+                    modifier = Modifier.fillMaxWidth()
+                )
 
                 Text("📅 旅遊日期區間 (選填)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                OutlinedTextField(
-                    value = dateRange, onValueChange = {}, readOnly = true, enabled = false,
-                    placeholder = { Text("點擊設定日期範圍...") },
-                    modifier = Modifier.fillMaxWidth().clickable { showDatePicker = true },
-                    colors = OutlinedTextFieldDefaults.colors(disabledTextColor = MaterialTheme.colorScheme.onSurface, disabledBorderColor = MaterialTheme.colorScheme.outline)
-                )
+
+                // 5. 修改此處：將原本單一的輸入框改為兩個並排
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // 開始日期
+                    OutlinedTextField(
+                        value = startDate,
+                        onValueChange = {},
+                        readOnly = true,
+                        enabled = false,
+                        placeholder = { Text("開始日期", color = Color.Gray) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { showStartPicker = true },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                            disabledBorderColor = MaterialTheme.colorScheme.outline
+                        )
+                    )
+                    // 結束日期
+                    OutlinedTextField(
+                        value = endDate,
+                        onValueChange = {},
+                        readOnly = true,
+                        enabled = false,
+                        placeholder = { Text("結束日期", color = Color.Gray) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { showEndPicker = true },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                            disabledBorderColor = MaterialTheme.colorScheme.outline
+                        )
+                    )
+                }
             }
         },
         confirmButton = {
-            Button(onClick = { if (name.isNotBlank()) onConfirm(name, selectedIcon, dateRange) }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF008080))) { Text("儲存") }
+            Button(onClick = {
+                if (name.isNotBlank()) {
+                    // 6. 儲存時將兩個日期組合成原本的格式
+                    val finalRange = if (startDate.isNotBlank() && endDate.isNotBlank()) "$startDate ~ $endDate" else if(startDate.isNotBlank()) startDate else ""
+                    onConfirm(name, selectedIcon, finalRange)
+                }
+            }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF008080))) { Text("儲存") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
@@ -381,11 +447,12 @@ fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
     val lifecycleOwner = LocalLifecycleOwner.current
     var hasCameraPermission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
 
-    // 防止掃描重複觸發
-    var isScanning by remember { mutableStateOf(true) }
+    // 使用 AtomicBoolean 防止重複掃描
+    val isProcessing = remember { AtomicBoolean(false) }
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasCameraPermission = it }
     LaunchedEffect(Unit) { if (!hasCameraPermission) launcher.launch(Manifest.permission.CAMERA) }
+
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri?.let {
             val inputStream = context.contentResolver.openInputStream(it)
@@ -396,38 +463,58 @@ fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
             }
         }
     }
+
     Scaffold(topBar = { TopAppBar(title = { Text("掃描行程 QR Code") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } }) }) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding), horizontalAlignment = Alignment.CenterHorizontally) {
             if (hasCameraPermission) {
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     AndroidView(factory = { ctx ->
                         val previewView = PreviewView(ctx)
-                        ProcessCameraProvider.getInstance(ctx).addListener({
-                            val cameraProvider = cameraProviderFutureGet(ProcessCameraProvider.getInstance(ctx))
+                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+
+                        cameraProviderFuture.addListener({
+                            val cameraProvider = cameraProviderFuture.get()
                             val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-                            val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build().also {
-                                it.setAnalyzer(Executors.newSingleThreadExecutor()) { proxy ->
-                                    if (!isScanning) {
-                                        proxy.close()
-                                        return@setAnalyzer
-                                    }
-                                    proxy.image?.let { img ->
-                                        BarcodeScanning.getClient().process(InputImage.fromMediaImage(img, proxy.imageInfo.rotationDegrees))
-                                            .addOnSuccessListener { codes ->
-                                                if (isScanning) {
-                                                    codes.firstOrNull()?.rawValue?.let { res ->
-                                                        isScanning = false
-                                                        onResult(res)
+
+                            val analysis = ImageAnalysis.Builder()
+                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                .build()
+                                .also {
+                                    it.setAnalyzer(Executors.newSingleThreadExecutor()) { proxy ->
+                                        // 1. 如果已經在處理中，直接關閉這一幀
+                                        if (isProcessing.get()) {
+                                            proxy.close()
+                                            return@setAnalyzer
+                                        }
+
+                                        proxy.image?.let { img ->
+                                            BarcodeScanning.getClient().process(InputImage.fromMediaImage(img, proxy.imageInfo.rotationDegrees))
+                                                .addOnSuccessListener { codes ->
+                                                    // 2. 雙重檢查：如果找到條碼且目前沒在處理
+                                                    val rawValue = codes.firstOrNull()?.rawValue
+                                                    if (rawValue != null && !isProcessing.getAndSet(true)) {
+                                                        // 3. 搶佔鎖成功，切回主執行緒
+                                                        Handler(Looper.getMainLooper()).post {
+                                                            try {
+                                                                cameraProvider.unbindAll() // 強制停止相機
+                                                                onResult(rawValue)
+                                                            } catch (e: Exception) {
+                                                                e.printStackTrace()
+                                                            }
+                                                        }
                                                     }
                                                 }
-                                            }
-                                            .addOnCompleteListener { proxy.close() }
-                                    } ?: proxy.close()
+                                                .addOnCompleteListener { proxy.close() }
+                                        } ?: proxy.close()
+                                    }
                                 }
-                            }
-                            cameraProvider.unbindAll()
-                            cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+
+                            try {
+                                cameraProvider.unbindAll()
+                                cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                            } catch (e: Exception) { e.printStackTrace() }
                         }, ContextCompat.getMainExecutor(ctx))
+
                         previewView
                     }, modifier = Modifier.fillMaxSize())
                     Box(Modifier.size(250.dp).border(2.dp, Color.White, RoundedCornerShape(12.dp)).align(Alignment.Center))
@@ -559,42 +646,12 @@ fun AddItineraryDialog(
         DatePickerDialog(onDismissRequest = { showDP = false }, confirmButton = { TextButton(onClick = { state.selectedDateMillis?.let { date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(it)) }; showDP = false }) { Text("確定") } }) { DatePicker(state) }
     }
     if (showTP) {
-        val parts = time.split(":")
-        val initHour = parts.getOrNull(0)?.toIntOrNull() ?: cal.get(Calendar.HOUR_OF_DAY)
-        val initMinute = parts.getOrNull(1)?.toIntOrNull() ?: cal.get(Calendar.MINUTE)
-
-        var tempHour by remember { mutableIntStateOf(initHour) }
-        var tempMinute by remember { mutableIntStateOf(initMinute) }
-
-        AlertDialog(
-            onDismissRequest = { showTP = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    time = String.format("%02d:%02d", tempHour, tempMinute)
-                    showTP = false
-                }) { Text("確定") }
-            },
-            text = {
-                AndroidView(
-                    factory = { ctx ->
-                        // 修正：從 Theme_Holo_Light 改為 Theme_Holo (深色主題)
-                        // 這會讓文字變成白色，適應深色的 Dialog 背景
-                        val wrapper = android.view.ContextThemeWrapper(ctx, android.R.style.Theme_Holo_Dialog_NoActionBar)
-                        android.widget.TimePicker(wrapper).apply {
-                            setIs24HourView(true)
-                            hour = initHour
-                            minute = initMinute
-                            setOnTimeChangedListener { _, h, m ->
-                                tempHour = h
-                                tempMinute = m
-                            }
-                            background = null
-                        }
-                    },
-                    modifier = Modifier.wrapContentSize()
-                )
-            }
+        val state = rememberTimePickerState(
+            initialHour = time.split(":")[0].toIntOrNull() ?: cal.get(Calendar.HOUR_OF_DAY),
+            initialMinute = time.split(":")[1].toIntOrNull() ?: cal.get(Calendar.MINUTE),
+            is24Hour = true
         )
+        AlertDialog(onDismissRequest = { showTP = false }, confirmButton = { TextButton(onClick = { time = String.format("%02d:%02d", state.hour, state.minute); showTP = false }) { Text("確定") } }, text = { TimePicker(state) })
     }
 
     AlertDialog(

@@ -8,8 +8,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -68,7 +66,6 @@ import kotlinx.serialization.json.Json
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 
 // --- 資料模型 ---
 @Serializable
@@ -376,6 +373,7 @@ fun TripGridCard(trip: Trip, onClick: () -> Unit, onLongClick: () -> Unit, onDel
     }
 }
 
+@androidx.annotation.OptIn(ExperimentalGetImage::class)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
@@ -383,13 +381,11 @@ fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
     val lifecycleOwner = LocalLifecycleOwner.current
     var hasCameraPermission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
 
-    // 修復核心：使用 AtomicBoolean 來保證多執行緒下的鎖定是「瞬間生效」的
-    // 這比 Compose 的 State 更適合用來處理高頻相機回調
-    val isProcessing = remember { AtomicBoolean(false) }
+    // 防止掃描重複觸發
+    var isScanning by remember { mutableStateOf(true) }
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasCameraPermission = it }
     LaunchedEffect(Unit) { if (!hasCameraPermission) launcher.launch(Manifest.permission.CAMERA) }
-
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri?.let {
             val inputStream = context.contentResolver.openInputStream(it)
@@ -400,60 +396,38 @@ fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
             }
         }
     }
-
     Scaffold(topBar = { TopAppBar(title = { Text("掃描行程 QR Code") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } }) }) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding), horizontalAlignment = Alignment.CenterHorizontally) {
             if (hasCameraPermission) {
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     AndroidView(factory = { ctx ->
                         val previewView = PreviewView(ctx)
-                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-
-                        cameraProviderFuture.addListener({
-                            val cameraProvider = cameraProviderFuture.get()
+                        ProcessCameraProvider.getInstance(ctx).addListener({
+                            val cameraProvider = cameraProviderFutureGet(ProcessCameraProvider.getInstance(ctx))
                             val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-
-                            val analysis = ImageAnalysis.Builder()
-                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                                .build()
-                                .also {
-                                    it.setAnalyzer(Executors.newSingleThreadExecutor()) { proxy ->
-                                        // 1. 如果已經在處理中，直接關閉這一幀，不做任何計算
-                                        if (isProcessing.get()) {
-                                            proxy.close()
-                                            return@setAnalyzer
-                                        }
-
-                                        proxy.image?.let { img ->
-                                            BarcodeScanning.getClient().process(InputImage.fromMediaImage(img, proxy.imageInfo.rotationDegrees))
-                                                .addOnSuccessListener { codes ->
-                                                    // 2. 雙重檢查：如果找到條碼且目前沒在處理
-                                                    val rawValue = codes.firstOrNull()?.rawValue
-                                                    if (rawValue != null && !isProcessing.getAndSet(true)) {
-                                                        // 3. getAndSet(true) 會原子性地設為 true 並回傳舊值。如果舊值是 false，代表我們搶到了執行權
-
-                                                        // 4. 切換回主執行緒來停止相機和導航，避免白畫面
-                                                        Handler(Looper.getMainLooper()).post {
-                                                            try {
-                                                                cameraProvider.unbindAll() // 強制切斷相機，物理上停止接收新幀
-                                                                onResult(rawValue)
-                                                            } catch (e: Exception) {
-                                                                e.printStackTrace()
-                                                            }
-                                                        }
+                            val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build().also {
+                                it.setAnalyzer(Executors.newSingleThreadExecutor()) { proxy ->
+                                    if (!isScanning) {
+                                        proxy.close()
+                                        return@setAnalyzer
+                                    }
+                                    proxy.image?.let { img ->
+                                        BarcodeScanning.getClient().process(InputImage.fromMediaImage(img, proxy.imageInfo.rotationDegrees))
+                                            .addOnSuccessListener { codes ->
+                                                if (isScanning) {
+                                                    codes.firstOrNull()?.rawValue?.let { res ->
+                                                        isScanning = false
+                                                        onResult(res)
                                                     }
                                                 }
-                                                .addOnCompleteListener { proxy.close() }
-                                        } ?: proxy.close()
-                                    }
+                                            }
+                                            .addOnCompleteListener { proxy.close() }
+                                    } ?: proxy.close()
                                 }
-
-                            try {
-                                cameraProvider.unbindAll()
-                                cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
-                            } catch (e: Exception) { e.printStackTrace() }
+                            }
+                            cameraProvider.unbindAll()
+                            cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                         }, ContextCompat.getMainExecutor(ctx))
-
                         previewView
                     }, modifier = Modifier.fillMaxSize())
                     Box(Modifier.size(250.dp).border(2.dp, Color.White, RoundedCornerShape(12.dp)).align(Alignment.Center))
@@ -585,12 +559,42 @@ fun AddItineraryDialog(
         DatePickerDialog(onDismissRequest = { showDP = false }, confirmButton = { TextButton(onClick = { state.selectedDateMillis?.let { date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(it)) }; showDP = false }) { Text("確定") } }) { DatePicker(state) }
     }
     if (showTP) {
-        val state = rememberTimePickerState(
-            initialHour = time.split(":")[0].toIntOrNull() ?: cal.get(Calendar.HOUR_OF_DAY),
-            initialMinute = time.split(":")[1].toIntOrNull() ?: cal.get(Calendar.MINUTE),
-            is24Hour = true
+        val parts = time.split(":")
+        val initHour = parts.getOrNull(0)?.toIntOrNull() ?: cal.get(Calendar.HOUR_OF_DAY)
+        val initMinute = parts.getOrNull(1)?.toIntOrNull() ?: cal.get(Calendar.MINUTE)
+
+        var tempHour by remember { mutableIntStateOf(initHour) }
+        var tempMinute by remember { mutableIntStateOf(initMinute) }
+
+        AlertDialog(
+            onDismissRequest = { showTP = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    time = String.format("%02d:%02d", tempHour, tempMinute)
+                    showTP = false
+                }) { Text("確定") }
+            },
+            text = {
+                AndroidView(
+                    factory = { ctx ->
+                        // 修正：從 Theme_Holo_Light 改為 Theme_Holo (深色主題)
+                        // 這會讓文字變成白色，適應深色的 Dialog 背景
+                        val wrapper = android.view.ContextThemeWrapper(ctx, android.R.style.Theme_Holo_Dialog_NoActionBar)
+                        android.widget.TimePicker(wrapper).apply {
+                            setIs24HourView(true)
+                            hour = initHour
+                            minute = initMinute
+                            setOnTimeChangedListener { _, h, m ->
+                                tempHour = h
+                                tempMinute = m
+                            }
+                            background = null
+                        }
+                    },
+                    modifier = Modifier.wrapContentSize()
+                )
+            }
         )
-        AlertDialog(onDismissRequest = { showTP = false }, confirmButton = { TextButton(onClick = { time = String.format("%02d:%02d", state.hour, state.minute); showTP = false }) { Text("確定") } }, text = { TimePicker(state) })
     }
 
     AlertDialog(

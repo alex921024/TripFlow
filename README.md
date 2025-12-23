@@ -101,7 +101,3 @@ dependencies {
 ## 📄 授權 (License)
 
 [MIT License](https://www.google.com/search?q=LICENSE)
-
-```
-
-```

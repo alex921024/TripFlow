@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -42,6 +43,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.layout
@@ -215,6 +217,8 @@ fun TripApp() {
     }
 }
 
+// ---------------------- 主畫面 (包含列表與日曆切換) ----------------------
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
@@ -227,6 +231,10 @@ fun DashboardScreen(
 ) {
     var showSettingsDialog by remember { mutableStateOf<Trip?>(null) }
     var showAddDialog by remember { mutableStateOf(false) }
+    var tripToDelete by remember { mutableStateOf<Trip?>(null) }
+
+    // 新增：目前的分頁 (0: 列表, 1: 日曆)
+    var currentTab by remember { mutableIntStateOf(0) }
 
     Scaffold(
         topBar = {
@@ -235,32 +243,61 @@ fun DashboardScreen(
                 actions = { IconButton(onClick = onScanClick) { Icon(Icons.Default.QrCodeScanner, null) } }
             )
         },
+        // 新增：底部導航列，用來切換分頁
+        bottomBar = {
+            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.List, contentDescription = "列表") },
+                    label = { Text("列表") },
+                    selected = currentTab == 0,
+                    onClick = { currentTab = 0 },
+                    colors = NavigationBarItemDefaults.colors(selectedIconColor = Color(0xFF008080), selectedTextColor = Color(0xFF008080))
+                )
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.DateRange, contentDescription = "日曆") },
+                    label = { Text("日曆") },
+                    selected = currentTab == 1,
+                    onClick = { currentTab = 1 },
+                    colors = NavigationBarItemDefaults.colors(selectedIconColor = Color(0xFF008080), selectedTextColor = Color(0xFF008080))
+                )
+            }
+        },
         floatingActionButton = {
-            FloatingActionButton(onClick = { showAddDialog = true }, containerColor = Color(0xFF008080)) {
-                Icon(Icons.Default.Add, null, tint = Color.White)
+            // 只在列表模式顯示新增按鈕，避免混淆
+            if (currentTab == 0) {
+                FloatingActionButton(onClick = { showAddDialog = true }, containerColor = Color(0xFF008080)) {
+                    Icon(Icons.Default.Add, null, tint = Color.White)
+                }
             }
         }
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
-            Text("長按行程卡片可進入存檔設定", modifier = Modifier.fillMaxWidth().padding(8.dp), textAlign = TextAlign.Center, color = Color.Gray, fontSize = 12.sp)
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
-                contentPadding = PaddingValues(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                items(trips) { trip ->
-                    TripGridCard(
-                        trip = trip,
-                        onClick = { onTripClick(trip) },
-                        onLongClick = { showSettingsDialog = trip },
-                        onDelete = { onDeleteTrip(trip) }
-                    )
+            if (currentTab == 0) {
+                // --- 列表視圖 ---
+                Text("長按行程卡片可進入存檔設定", modifier = Modifier.fillMaxWidth().padding(8.dp), textAlign = TextAlign.Center, color = Color.Gray, fontSize = 12.sp)
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    contentPadding = PaddingValues(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(trips) { trip ->
+                        TripGridCard(
+                            trip = trip,
+                            onClick = { onTripClick(trip) },
+                            onLongClick = { showSettingsDialog = trip },
+                            onDelete = { tripToDelete = trip }
+                        )
+                    }
                 }
+            } else {
+                // --- 日曆視圖 ---
+                TripCalendar(trips = trips)
             }
         }
 
+        // 彈窗邏輯
         if (showAddDialog) {
             TripSettingsDialog(
                 title = "建立新旅程",
@@ -283,8 +320,129 @@ fun DashboardScreen(
                 }
             )
         }
+
+        tripToDelete?.let { trip ->
+            AlertDialog(
+                onDismissRequest = { tripToDelete = null },
+                title = { Text("確定要刪除旅程？", fontWeight = FontWeight.Bold) },
+                text = { Text("您即將刪除「${trip.name}」\n此動作無法復原，是否繼續？") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            onDeleteTrip(trip)
+                            tripToDelete = null
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
+                    ) { Text("刪除") }
+                },
+                dismissButton = { TextButton(onClick = { tripToDelete = null }) { Text("取消") } }
+            )
+        }
     }
 }
+
+// ---------------------- 日曆元件 ----------------------
+
+@Composable
+fun TripCalendar(trips: List<Trip>) {
+    val calendar = remember { Calendar.getInstance() }
+    var currentMonth by remember { mutableStateOf(calendar.clone() as Calendar) }
+
+    // 日期格式化工具
+    val sdf = remember { SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()) }
+    val monthFormat = remember { SimpleDateFormat("yyyy 年 MM 月", Locale.getDefault()) }
+
+    // 取得當前月份資訊
+    val daysInMonth = currentMonth.getActualMaximum(Calendar.DAY_OF_MONTH)
+    val firstDayOfWeek = currentMonth.clone().apply {
+        if (this is Calendar) set(Calendar.DAY_OF_MONTH, 1)
+    }.let { (it as Calendar).get(Calendar.DAY_OF_WEEK) }
+
+    // 輔助函式：判斷某一天是否有行程
+    fun getTripForDate(day: Int): Trip? {
+        val checkCal = currentMonth.clone() as Calendar
+        checkCal.set(Calendar.DAY_OF_MONTH, day)
+        val dateStr = sdf.format(checkCal.time)
+
+        return trips.find { trip ->
+            if (trip.dateRange.contains("~")) {
+                val parts = trip.dateRange.split(" ~ ")
+                if (parts.size == 2) {
+                    val start = parts[0]
+                    val end = parts[1]
+                    dateStr >= start && dateStr <= end
+                } else false
+            } else {
+                trip.dateRange == dateStr
+            }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        // 月份切換標題
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = {
+                currentMonth.add(Calendar.MONTH, -1)
+                currentMonth = currentMonth.clone() as Calendar // 觸發重繪
+            }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "上個月") }
+
+            Text(monthFormat.format(currentMonth.time), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF008080))
+
+            IconButton(onClick = {
+                currentMonth.add(Calendar.MONTH, 1)
+                currentMonth = currentMonth.clone() as Calendar
+            }) { Icon(Icons.Default.ArrowForward, "下個月") }
+        }
+
+        // 星期標題
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
+            listOf("日", "一", "二", "三", "四", "五", "六").forEach {
+                Text(it, fontWeight = FontWeight.Bold, color = Color.Gray)
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // 日曆格子
+        LazyVerticalGrid(columns = GridCells.Fixed(7), modifier = Modifier.fillMaxSize()) {
+            // 填充前面的空白 (注意：Calendar.SUNDAY 是 1，所以要減 1)
+            items(firstDayOfWeek - 1) { Box(Modifier.size(40.dp)) }
+
+            // 填充日期
+            items(daysInMonth) { index ->
+                val day = index + 1
+                val trip = getTripForDate(day)
+
+                Box(
+                    modifier = Modifier
+                        .padding(2.dp)
+                        .aspectRatio(1f) // 正方形
+                        .clip(CircleShape)
+                        .background(if (trip != null) Color(0xFF008080).copy(alpha = 0.2f) else Color.Transparent)
+                        .border(1.dp, if (trip != null) Color(0xFF008080) else Color.Transparent, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "$day",
+                            fontWeight = if (trip != null) FontWeight.Bold else FontWeight.Normal,
+                            color = if (trip != null) Color(0xFF008080) else MaterialTheme.colorScheme.onSurface
+                        )
+                        if (trip != null) {
+                            Text(trip.icon, fontSize = 8.sp) // 顯示行程圖示
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------- 原有元件維持不變 ----------------------
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -297,18 +455,15 @@ fun TripSettingsDialog(
     var name by remember { mutableStateOf(initialTrip?.name ?: "") }
     var selectedIcon by remember { mutableStateOf(initialTrip?.icon ?: "✈️") }
 
-    // 1. 解析初始日期 (如果是編輯模式)
     val initialDates = initialTrip?.dateRange?.split(" ~ ")
     var startDate by remember { mutableStateOf(initialDates?.getOrNull(0) ?: "") }
     var endDate by remember { mutableStateOf(initialDates?.getOrNull(1) ?: "") }
 
-    // 2. 建立兩個獨立的顯示開關
     var showStartPicker by remember { mutableStateOf(false) }
     var showEndPicker by remember { mutableStateOf(false) }
 
     val icons = listOf("✈️", "🧳", "🏝️", "🏔️", "🏕️", "🏙️", "🚂", "🚗", "🚢", "🎡", "🎢", "📷", "🛍️", "🍜", "🍻")
 
-    // 3. 開始日期的選取器
     if (showStartPicker) {
         val datePickerState = rememberDatePickerState()
         DatePickerDialog(
@@ -324,7 +479,6 @@ fun TripSettingsDialog(
         ) { DatePicker(state = datePickerState) }
     }
 
-    // 4. 結束日期的選取器
     if (showEndPicker) {
         val datePickerState = rememberDatePickerState()
         DatePickerDialog(
@@ -368,9 +522,7 @@ fun TripSettingsDialog(
 
                 Text("📅 旅遊日期區間 (選填)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
 
-                // 5. 修改此處：將原本單一的輸入框改為兩個並排
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // 開始日期
                     OutlinedTextField(
                         value = startDate,
                         onValueChange = {},
@@ -385,7 +537,6 @@ fun TripSettingsDialog(
                             disabledBorderColor = MaterialTheme.colorScheme.outline
                         )
                     )
-                    // 結束日期
                     OutlinedTextField(
                         value = endDate,
                         onValueChange = {},
@@ -406,7 +557,6 @@ fun TripSettingsDialog(
         confirmButton = {
             Button(onClick = {
                 if (name.isNotBlank()) {
-                    // 6. 儲存時將兩個日期組合成原本的格式
                     val finalRange = if (startDate.isNotBlank() && endDate.isNotBlank()) "$startDate ~ $endDate" else if(startDate.isNotBlank()) startDate else ""
                     onConfirm(name, selectedIcon, finalRange)
                 }
@@ -439,7 +589,6 @@ fun TripGridCard(trip: Trip, onClick: () -> Unit, onLongClick: () -> Unit, onDel
     }
 }
 
-@androidx.annotation.OptIn(ExperimentalGetImage::class)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {

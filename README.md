@@ -1,5 +1,3 @@
-# TripFlow--Smart_Itinerar_ Manager_Share
-
 # ✈️ TripFlow - Android 旅遊行程管理助手
 
 **TripFlow** 是一款基於 **Jetpack Compose** 開發的現代化 Android 旅遊規劃應用程式。它提供直觀的介面來管理旅程、規劃詳細時間軸，並透過 QR Code 技術實現行程的快速分享與匯入。

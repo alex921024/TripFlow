@@ -45,6 +45,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
@@ -231,7 +232,6 @@ fun DashboardScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var tripToDelete by remember { mutableStateOf<Trip?>(null) }
 
-    // 目前的分頁 (0: 列表, 1: 日曆)
     var currentTab by remember { mutableIntStateOf(0) }
 
     Scaffold(
@@ -269,7 +269,6 @@ fun DashboardScreen(
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
             if (currentTab == 0) {
-                // --- 列表視圖 ---
                 Text("長按行程卡片可進入存檔設定", modifier = Modifier.fillMaxWidth().padding(8.dp), textAlign = TextAlign.Center, color = Color.Gray, fontSize = 12.sp)
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
@@ -288,7 +287,6 @@ fun DashboardScreen(
                     }
                 }
             } else {
-                // --- 日曆視圖 ---
                 TripCalendar(trips = trips)
             }
         }
@@ -336,14 +334,13 @@ fun DashboardScreen(
     }
 }
 
-// ---------------------- 優化後的日曆元件 ----------------------
+// ---------------------- 修正後的日曆元件 ----------------------
 
 @Composable
 fun TripCalendar(trips: List<Trip>) {
     var currentYear by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.YEAR)) }
     var currentMonth by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.MONTH)) } // 0-based
 
-    // 預先計算日曆的基本資訊
     val calendarInfo = remember(currentYear, currentMonth) {
         val cal = Calendar.getInstance()
         cal.set(Calendar.YEAR, currentYear)
@@ -356,16 +353,14 @@ fun TripCalendar(trips: List<Trip>) {
     val (baseCal, daysInMonth, firstDayOfWeek) = calendarInfo
     val monthFormat = remember { SimpleDateFormat("yyyy 年 MM 月", Locale.getDefault()) }
 
-    // --- 效能優化：預先計算當月每一天對應的行程 ---
-    // 這會產生一個 Map: 日期數字 (Int) -> 對應的 Trip (Trip?)
-    // 這樣在繪製格子時就不用重複跑迴圈，解決卡頓問題
+    // Map: 日期 -> (Trip, PositionFlag)
+    // PositionFlag: 0=單日, 1=開始, 2=中間, 3=結束
     val tripMap = remember(trips, currentYear, currentMonth) {
-        val map = mutableMapOf<Int, Trip>()
+        val map = mutableMapOf<Int, Pair<Trip, Int>>()
         val cal = Calendar.getInstance()
 
-        // 輔助函式：解析日期字串，支援 yyyy/MM/dd 與 MM/dd
         fun parseDate(dateStr: String): Calendar? {
-            // 嘗試格式 1: yyyy/MM/dd
+            // yyyy/MM/dd
             try {
                 val sdfFull = SimpleDateFormat("yyyy/MM/dd", Locale.getDefault())
                 sdfFull.parse(dateStr)?.let {
@@ -373,20 +368,19 @@ fun TripCalendar(trips: List<Trip>) {
                 }
             } catch (e: Exception) { /* continue */ }
 
-            // 嘗試格式 2: MM/dd (補上當前日曆的年份)
+            // MM/dd (自動補上當前年份)
             try {
                 val sdfShort = SimpleDateFormat("MM/dd", Locale.getDefault())
                 sdfShort.parse(dateStr)?.let {
                     val c = Calendar.getInstance()
                     c.time = it
-                    c.set(Calendar.YEAR, currentYear) // 使用當前檢視的年份
+                    c.set(Calendar.YEAR, currentYear)
                     return c
                 }
             } catch (e: Exception) { /* continue */ }
             return null
         }
 
-        // 遍歷所有旅程，填入 Map
         trips.forEach { trip ->
             if (trip.dateRange.contains("~")) {
                 val parts = trip.dateRange.split("~").map { it.trim() }
@@ -395,24 +389,29 @@ fun TripCalendar(trips: List<Trip>) {
                     val endCal = parseDate(parts[1])
 
                     if (startCal != null && endCal != null) {
-                        // 防呆：如果開始晚於結束，自動對調
+                        // 強制修正：確保 start <= end
                         val (actualStart, actualEnd) = if (startCal.timeInMillis > endCal.timeInMillis) endCal to startCal else startCal to endCal
 
-                        // 只處理當前月份的範圍
                         val iterCal = actualStart.clone() as Calendar
                         while (!iterCal.after(actualEnd)) {
+                            // 只標記當前年份月份的日期
                             if (iterCal.get(Calendar.YEAR) == currentYear && iterCal.get(Calendar.MONTH) == currentMonth) {
-                                map[iterCal.get(Calendar.DAY_OF_MONTH)] = trip
+                                val day = iterCal.get(Calendar.DAY_OF_MONTH)
+                                val pos = when {
+                                    iterCal.get(Calendar.DAY_OF_YEAR) == actualStart.get(Calendar.DAY_OF_YEAR) -> 1 // Start
+                                    iterCal.get(Calendar.DAY_OF_YEAR) == actualEnd.get(Calendar.DAY_OF_YEAR) -> 3 // End
+                                    else -> 2 // Middle
+                                }
+                                map[day] = trip to pos
                             }
                             iterCal.add(Calendar.DAY_OF_MONTH, 1)
                         }
                     }
                 }
             } else {
-                // 單日行程
                 val singleCal = parseDate(trip.dateRange)
                 if (singleCal != null && singleCal.get(Calendar.YEAR) == currentYear && singleCal.get(Calendar.MONTH) == currentMonth) {
-                    map[singleCal.get(Calendar.DAY_OF_MONTH)] = trip
+                    map[singleCal.get(Calendar.DAY_OF_MONTH)] = trip to 0 // Single
                 }
             }
         }
@@ -420,34 +419,22 @@ fun TripCalendar(trips: List<Trip>) {
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        // 月份切換標題
         Row(
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = {
-                if (currentMonth == 0) {
-                    currentMonth = 11
-                    currentYear--
-                } else {
-                    currentMonth--
-                }
+                if (currentMonth == 0) { currentMonth = 11; currentYear-- } else { currentMonth-- }
             }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "上個月") }
 
             Text(monthFormat.format(baseCal.time), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF008080))
 
             IconButton(onClick = {
-                if (currentMonth == 11) {
-                    currentMonth = 0
-                    currentYear++
-                } else {
-                    currentMonth++
-                }
+                if (currentMonth == 11) { currentMonth = 0; currentYear++ } else { currentMonth++ }
             }) { Icon(Icons.Default.ArrowForward, "下個月") }
         }
 
-        // 星期標題
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
             listOf("日", "一", "二", "三", "四", "五", "六").forEach {
                 Text(it, fontWeight = FontWeight.Bold, color = Color.Gray)
@@ -456,23 +443,30 @@ fun TripCalendar(trips: List<Trip>) {
 
         Spacer(Modifier.height(8.dp))
 
-        // 日曆格子
         LazyVerticalGrid(columns = GridCells.Fixed(7), modifier = Modifier.fillMaxSize()) {
-            // 填充前面的空白
             items(firstDayOfWeek - 1) { Box(Modifier.size(40.dp)) }
 
-            // 填充日期
             items(daysInMonth) { index ->
                 val day = index + 1
-                val trip = tripMap[day] // 直接從預計算的 Map 讀取
+                val tripInfo = tripMap[day]
+                val trip = tripInfo?.first
+                val pos = tripInfo?.second ?: -1
+
+                // 定義背景形狀：
+                val bgShape = when (pos) {
+                    0 -> CircleShape // 單日
+                    1 -> RoundedCornerShape(topStart = 50.dp, bottomStart = 50.dp) // 開始 (左圓)
+                    3 -> RoundedCornerShape(topEnd = 50.dp, bottomEnd = 50.dp) // 結束 (右圓)
+                    2 -> RectangleShape // 中間 (方形)
+                    else -> RectangleShape
+                }
 
                 Box(
                     modifier = Modifier
-                        .padding(2.dp)
-                        .aspectRatio(1f) // 正方形
-                        .clip(CircleShape)
-                        .background(if (trip != null) Color(0xFF008080).copy(alpha = 0.2f) else Color.Transparent)
-                        .border(1.dp, if (trip != null) Color(0xFF008080) else Color.Transparent, CircleShape),
+                        .padding(vertical = 2.dp) // 上下留白，左右連貫
+                        .aspectRatio(1f)
+                        .clip(bgShape)
+                        .background(if (trip != null) Color(0xFF008080).copy(alpha = if(pos==2) 0.15f else 0.3f) else Color.Transparent),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -481,9 +475,6 @@ fun TripCalendar(trips: List<Trip>) {
                             fontWeight = if (trip != null) FontWeight.Bold else FontWeight.Normal,
                             color = if (trip != null) Color(0xFF008080) else MaterialTheme.colorScheme.onSurface
                         )
-                        if (trip != null) {
-                            Text(trip.icon, fontSize = 8.sp)
-                        }
                     }
                 }
             }
@@ -491,7 +482,7 @@ fun TripCalendar(trips: List<Trip>) {
     }
 }
 
-// ---------------------- 設定對話框 (包含日期防呆修正) ----------------------
+// ---------------------- 舊有元件 ----------------------
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -606,9 +597,9 @@ fun TripSettingsDialog(
         confirmButton = {
             Button(onClick = {
                 if (name.isNotBlank()) {
-                    // 自動對調日期：如果開始日期 > 結束日期，則交換
                     var finalStart = startDate
                     var finalEnd = endDate
+                    // 自動對調防呆
                     if (startDate.isNotBlank() && endDate.isNotBlank() && startDate > endDate) {
                         finalStart = endDate
                         finalEnd = startDate
@@ -655,7 +646,6 @@ fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasCameraPermission = it }
     LaunchedEffect(Unit) { if (!hasCameraPermission) launcher.launch(Manifest.permission.CAMERA) }
-
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri?.let {
             val inputStream = context.contentResolver.openInputStream(it)
@@ -666,17 +656,14 @@ fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
             }
         }
     }
-
     Scaffold(topBar = { TopAppBar(title = { Text("掃描行程 QR Code") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } }) }) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding), horizontalAlignment = Alignment.CenterHorizontally) {
             if (hasCameraPermission) {
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     AndroidView(factory = { ctx ->
                         val previewView = PreviewView(ctx)
-                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-
-                        cameraProviderFuture.addListener({
-                            val cameraProvider = cameraProviderFuture.get()
+                        ProcessCameraProvider.getInstance(ctx).addListener({
+                            val cameraProvider = cameraProviderFutureGet(ProcessCameraProvider.getInstance(ctx))
                             val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
                             val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build().also {
                                 it.setAnalyzer(Executors.newSingleThreadExecutor()) { proxy ->

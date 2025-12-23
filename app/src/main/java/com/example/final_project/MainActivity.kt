@@ -217,8 +217,6 @@ fun TripApp() {
     }
 }
 
-// ---------------------- 主畫面 (包含列表與日曆切換) ----------------------
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
@@ -233,7 +231,7 @@ fun DashboardScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var tripToDelete by remember { mutableStateOf<Trip?>(null) }
 
-    // 新增：目前的分頁 (0: 列表, 1: 日曆)
+    // 目前的分頁 (0: 列表, 1: 日曆)
     var currentTab by remember { mutableIntStateOf(0) }
 
     Scaffold(
@@ -243,7 +241,6 @@ fun DashboardScreen(
                 actions = { IconButton(onClick = onScanClick) { Icon(Icons.Default.QrCodeScanner, null) } }
             )
         },
-        // 新增：底部導航列，用來切換分頁
         bottomBar = {
             NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                 NavigationBarItem(
@@ -263,7 +260,6 @@ fun DashboardScreen(
             }
         },
         floatingActionButton = {
-            // 只在列表模式顯示新增按鈕，避免混淆
             if (currentTab == 0) {
                 FloatingActionButton(onClick = { showAddDialog = true }, containerColor = Color(0xFF008080)) {
                     Icon(Icons.Default.Add, null, tint = Color.White)
@@ -297,7 +293,6 @@ fun DashboardScreen(
             }
         }
 
-        // 彈窗邏輯
         if (showAddDialog) {
             TripSettingsDialog(
                 title = "建立新旅程",
@@ -341,41 +336,87 @@ fun DashboardScreen(
     }
 }
 
-// ---------------------- 日曆元件 ----------------------
+// ---------------------- 優化後的日曆元件 ----------------------
 
 @Composable
 fun TripCalendar(trips: List<Trip>) {
-    val calendar = remember { Calendar.getInstance() }
-    var currentMonth by remember { mutableStateOf(calendar.clone() as Calendar) }
+    var currentYear by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.YEAR)) }
+    var currentMonth by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.MONTH)) } // 0-based
 
-    // 日期格式化工具
-    val sdf = remember { SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()) }
+    // 預先計算日曆的基本資訊
+    val calendarInfo = remember(currentYear, currentMonth) {
+        val cal = Calendar.getInstance()
+        cal.set(Calendar.YEAR, currentYear)
+        cal.set(Calendar.MONTH, currentMonth)
+        cal.set(Calendar.DAY_OF_MONTH, 1)
+        val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
+        val firstDayOfWeek = cal.get(Calendar.DAY_OF_WEEK)
+        Triple(cal, daysInMonth, firstDayOfWeek)
+    }
+    val (baseCal, daysInMonth, firstDayOfWeek) = calendarInfo
     val monthFormat = remember { SimpleDateFormat("yyyy 年 MM 月", Locale.getDefault()) }
 
-    // 取得當前月份資訊
-    val daysInMonth = currentMonth.getActualMaximum(Calendar.DAY_OF_MONTH)
-    val firstDayOfWeek = currentMonth.clone().apply {
-        if (this is Calendar) set(Calendar.DAY_OF_MONTH, 1)
-    }.let { (it as Calendar).get(Calendar.DAY_OF_WEEK) }
+    // --- 效能優化：預先計算當月每一天對應的行程 ---
+    // 這會產生一個 Map: 日期數字 (Int) -> 對應的 Trip (Trip?)
+    // 這樣在繪製格子時就不用重複跑迴圈，解決卡頓問題
+    val tripMap = remember(trips, currentYear, currentMonth) {
+        val map = mutableMapOf<Int, Trip>()
+        val cal = Calendar.getInstance()
 
-    // 輔助函式：判斷某一天是否有行程
-    fun getTripForDate(day: Int): Trip? {
-        val checkCal = currentMonth.clone() as Calendar
-        checkCal.set(Calendar.DAY_OF_MONTH, day)
-        val dateStr = sdf.format(checkCal.time)
+        // 輔助函式：解析日期字串，支援 yyyy/MM/dd 與 MM/dd
+        fun parseDate(dateStr: String): Calendar? {
+            // 嘗試格式 1: yyyy/MM/dd
+            try {
+                val sdfFull = SimpleDateFormat("yyyy/MM/dd", Locale.getDefault())
+                sdfFull.parse(dateStr)?.let {
+                    return Calendar.getInstance().apply { time = it }
+                }
+            } catch (e: Exception) { /* continue */ }
 
-        return trips.find { trip ->
+            // 嘗試格式 2: MM/dd (補上當前日曆的年份)
+            try {
+                val sdfShort = SimpleDateFormat("MM/dd", Locale.getDefault())
+                sdfShort.parse(dateStr)?.let {
+                    val c = Calendar.getInstance()
+                    c.time = it
+                    c.set(Calendar.YEAR, currentYear) // 使用當前檢視的年份
+                    return c
+                }
+            } catch (e: Exception) { /* continue */ }
+            return null
+        }
+
+        // 遍歷所有旅程，填入 Map
+        trips.forEach { trip ->
             if (trip.dateRange.contains("~")) {
-                val parts = trip.dateRange.split(" ~ ")
+                val parts = trip.dateRange.split("~").map { it.trim() }
                 if (parts.size == 2) {
-                    val start = parts[0]
-                    val end = parts[1]
-                    dateStr >= start && dateStr <= end
-                } else false
+                    val startCal = parseDate(parts[0])
+                    val endCal = parseDate(parts[1])
+
+                    if (startCal != null && endCal != null) {
+                        // 防呆：如果開始晚於結束，自動對調
+                        val (actualStart, actualEnd) = if (startCal.timeInMillis > endCal.timeInMillis) endCal to startCal else startCal to endCal
+
+                        // 只處理當前月份的範圍
+                        val iterCal = actualStart.clone() as Calendar
+                        while (!iterCal.after(actualEnd)) {
+                            if (iterCal.get(Calendar.YEAR) == currentYear && iterCal.get(Calendar.MONTH) == currentMonth) {
+                                map[iterCal.get(Calendar.DAY_OF_MONTH)] = trip
+                            }
+                            iterCal.add(Calendar.DAY_OF_MONTH, 1)
+                        }
+                    }
+                }
             } else {
-                trip.dateRange == dateStr
+                // 單日行程
+                val singleCal = parseDate(trip.dateRange)
+                if (singleCal != null && singleCal.get(Calendar.YEAR) == currentYear && singleCal.get(Calendar.MONTH) == currentMonth) {
+                    map[singleCal.get(Calendar.DAY_OF_MONTH)] = trip
+                }
             }
         }
+        map
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -386,15 +427,23 @@ fun TripCalendar(trips: List<Trip>) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = {
-                currentMonth.add(Calendar.MONTH, -1)
-                currentMonth = currentMonth.clone() as Calendar // 觸發重繪
+                if (currentMonth == 0) {
+                    currentMonth = 11
+                    currentYear--
+                } else {
+                    currentMonth--
+                }
             }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "上個月") }
 
-            Text(monthFormat.format(currentMonth.time), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF008080))
+            Text(monthFormat.format(baseCal.time), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF008080))
 
             IconButton(onClick = {
-                currentMonth.add(Calendar.MONTH, 1)
-                currentMonth = currentMonth.clone() as Calendar
+                if (currentMonth == 11) {
+                    currentMonth = 0
+                    currentYear++
+                } else {
+                    currentMonth++
+                }
             }) { Icon(Icons.Default.ArrowForward, "下個月") }
         }
 
@@ -409,13 +458,13 @@ fun TripCalendar(trips: List<Trip>) {
 
         // 日曆格子
         LazyVerticalGrid(columns = GridCells.Fixed(7), modifier = Modifier.fillMaxSize()) {
-            // 填充前面的空白 (注意：Calendar.SUNDAY 是 1，所以要減 1)
+            // 填充前面的空白
             items(firstDayOfWeek - 1) { Box(Modifier.size(40.dp)) }
 
             // 填充日期
             items(daysInMonth) { index ->
                 val day = index + 1
-                val trip = getTripForDate(day)
+                val trip = tripMap[day] // 直接從預計算的 Map 讀取
 
                 Box(
                     modifier = Modifier
@@ -433,7 +482,7 @@ fun TripCalendar(trips: List<Trip>) {
                             color = if (trip != null) Color(0xFF008080) else MaterialTheme.colorScheme.onSurface
                         )
                         if (trip != null) {
-                            Text(trip.icon, fontSize = 8.sp) // 顯示行程圖示
+                            Text(trip.icon, fontSize = 8.sp)
                         }
                     }
                 }
@@ -442,7 +491,7 @@ fun TripCalendar(trips: List<Trip>) {
     }
 }
 
-// ---------------------- 原有元件維持不變 ----------------------
+// ---------------------- 設定對話框 (包含日期防呆修正) ----------------------
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -557,7 +606,14 @@ fun TripSettingsDialog(
         confirmButton = {
             Button(onClick = {
                 if (name.isNotBlank()) {
-                    val finalRange = if (startDate.isNotBlank() && endDate.isNotBlank()) "$startDate ~ $endDate" else if(startDate.isNotBlank()) startDate else ""
+                    // 自動對調日期：如果開始日期 > 結束日期，則交換
+                    var finalStart = startDate
+                    var finalEnd = endDate
+                    if (startDate.isNotBlank() && endDate.isNotBlank() && startDate > endDate) {
+                        finalStart = endDate
+                        finalEnd = startDate
+                    }
+                    val finalRange = if (finalStart.isNotBlank() && finalEnd.isNotBlank()) "$finalStart ~ $finalEnd" else if(finalStart.isNotBlank()) finalStart else ""
                     onConfirm(name, selectedIcon, finalRange)
                 }
             }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF008080))) { Text("儲存") }
@@ -595,8 +651,6 @@ fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var hasCameraPermission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
-
-    // 使用 AtomicBoolean 防止重複掃描
     val isProcessing = remember { AtomicBoolean(false) }
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasCameraPermission = it }
@@ -624,46 +678,25 @@ fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
                         cameraProviderFuture.addListener({
                             val cameraProvider = cameraProviderFuture.get()
                             val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-
-                            val analysis = ImageAnalysis.Builder()
-                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                                .build()
-                                .also {
-                                    it.setAnalyzer(Executors.newSingleThreadExecutor()) { proxy ->
-                                        // 1. 如果已經在處理中，直接關閉這一幀
-                                        if (isProcessing.get()) {
-                                            proxy.close()
-                                            return@setAnalyzer
-                                        }
-
-                                        proxy.image?.let { img ->
-                                            BarcodeScanning.getClient().process(InputImage.fromMediaImage(img, proxy.imageInfo.rotationDegrees))
-                                                .addOnSuccessListener { codes ->
-                                                    // 2. 雙重檢查：如果找到條碼且目前沒在處理
-                                                    val rawValue = codes.firstOrNull()?.rawValue
-                                                    if (rawValue != null && !isProcessing.getAndSet(true)) {
-                                                        // 3. 搶佔鎖成功，切回主執行緒
-                                                        Handler(Looper.getMainLooper()).post {
-                                                            try {
-                                                                cameraProvider.unbindAll() // 強制停止相機
-                                                                onResult(rawValue)
-                                                            } catch (e: Exception) {
-                                                                e.printStackTrace()
-                                                            }
-                                                        }
+                            val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build().also {
+                                it.setAnalyzer(Executors.newSingleThreadExecutor()) { proxy ->
+                                    if (isProcessing.get()) { proxy.close(); return@setAnalyzer }
+                                    proxy.image?.let { img ->
+                                        BarcodeScanning.getClient().process(InputImage.fromMediaImage(img, proxy.imageInfo.rotationDegrees))
+                                            .addOnSuccessListener { codes ->
+                                                val rawValue = codes.firstOrNull()?.rawValue
+                                                if (rawValue != null && !isProcessing.getAndSet(true)) {
+                                                    Handler(Looper.getMainLooper()).post {
+                                                        try { cameraProvider.unbindAll(); onResult(rawValue) } catch (e: Exception) { e.printStackTrace() }
                                                     }
                                                 }
-                                                .addOnCompleteListener { proxy.close() }
-                                        } ?: proxy.close()
-                                    }
+                                            }
+                                            .addOnCompleteListener { proxy.close() }
+                                    } ?: proxy.close()
                                 }
-
-                            try {
-                                cameraProvider.unbindAll()
-                                cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
-                            } catch (e: Exception) { e.printStackTrace() }
+                            }
+                            try { cameraProvider.unbindAll(); cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis) } catch (e: Exception) { e.printStackTrace() }
                         }, ContextCompat.getMainExecutor(ctx))
-
                         previewView
                     }, modifier = Modifier.fillMaxSize())
                     Box(Modifier.size(250.dp).border(2.dp, Color.White, RoundedCornerShape(12.dp)).align(Alignment.Center))

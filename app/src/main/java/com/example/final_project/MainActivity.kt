@@ -36,6 +36,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -51,6 +52,7 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -79,7 +81,9 @@ data class Trip(
     val id: String = System.currentTimeMillis().toString(),
     var name: String,
     var icon: String = "✈️",
-    var dateRange: String = ""
+    var dateRange: String = "",
+    // 預算功能
+    var budget: Double = 0.0
 )
 
 @Serializable
@@ -90,7 +94,9 @@ data class ItineraryItem(
     var time: String,
     var description: String,
     var category: String,
-    var isFavorite: Boolean = false
+    var isFavorite: Boolean = false,
+    // 記帳功能
+    var cost: Double = 0.0
 )
 
 @Serializable
@@ -167,8 +173,8 @@ fun TripApp() {
                     val index = trips.indexOfFirst { it.id == trip.id }
                     if (index != -1) { trips[index] = trip; saveData() }
                 },
-                onAddTrip = { name, icon, range ->
-                    trips.add(Trip(name = name, icon = icon, dateRange = range))
+                onAddTrip = { name, icon, range, budget ->
+                    trips.add(Trip(name = name, icon = icon, dateRange = range, budget = budget))
                     saveData()
                 },
                 onDeleteTrip = { trip ->
@@ -218,13 +224,15 @@ fun TripApp() {
     }
 }
 
+// ---------------------- 主畫面 (整合 列表/日曆/記帳) ----------------------
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
     trips: List<Trip>,
     onTripClick: (Trip) -> Unit,
     onUpdateTrip: (Trip) -> Unit,
-    onAddTrip: (String, String, String) -> Unit,
+    onAddTrip: (String, String, String, Double) -> Unit,
     onDeleteTrip: (Trip) -> Unit,
     onScanClick: () -> Unit
 ) {
@@ -232,6 +240,7 @@ fun DashboardScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var tripToDelete by remember { mutableStateOf<Trip?>(null) }
 
+    // 0: 列表, 1: 日曆
     var currentTab by remember { mutableIntStateOf(0) }
 
     Scaffold(
@@ -269,6 +278,7 @@ fun DashboardScreen(
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
             if (currentTab == 0) {
+                // --- 列表視圖 ---
                 Text("長按行程卡片可進入存檔設定", modifier = Modifier.fillMaxWidth().padding(8.dp), textAlign = TextAlign.Center, color = Color.Gray, fontSize = 12.sp)
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
@@ -287,6 +297,7 @@ fun DashboardScreen(
                     }
                 }
             } else {
+                // --- 日曆視圖 ---
                 TripCalendar(trips = trips)
             }
         }
@@ -295,8 +306,8 @@ fun DashboardScreen(
             TripSettingsDialog(
                 title = "建立新旅程",
                 onDismiss = { showAddDialog = false },
-                onConfirm = { name, icon, range ->
-                    onAddTrip(name, icon, range)
+                onConfirm = { name, icon, range, budget ->
+                    onAddTrip(name, icon, range, budget)
                     showAddDialog = false
                 }
             )
@@ -307,8 +318,8 @@ fun DashboardScreen(
                 title = "存檔設定",
                 initialTrip = trip,
                 onDismiss = { showSettingsDialog = null },
-                onConfirm = { name, icon, range ->
-                    onUpdateTrip(trip.copy(name = name, icon = icon, dateRange = range))
+                onConfirm = { name, icon, range, budget ->
+                    onUpdateTrip(trip.copy(name = name, icon = icon, dateRange = range, budget = budget))
                     showSettingsDialog = null
                 }
             )
@@ -334,12 +345,12 @@ fun DashboardScreen(
     }
 }
 
-// ---------------------- 修正後的日曆元件 ----------------------
+// ---------------------- 修正與優化後的日曆元件 ----------------------
 
 @Composable
 fun TripCalendar(trips: List<Trip>) {
     var currentYear by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.YEAR)) }
-    var currentMonth by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.MONTH)) } // 0-based
+    var currentMonth by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.MONTH)) }
 
     val calendarInfo = remember(currentYear, currentMonth) {
         val cal = Calendar.getInstance()
@@ -353,22 +364,14 @@ fun TripCalendar(trips: List<Trip>) {
     val (baseCal, daysInMonth, firstDayOfWeek) = calendarInfo
     val monthFormat = remember { SimpleDateFormat("yyyy 年 MM 月", Locale.getDefault()) }
 
-    // Map: 日期 -> (Trip, PositionFlag)
-    // PositionFlag: 0=單日, 1=開始, 2=中間, 3=結束
     val tripMap = remember(trips, currentYear, currentMonth) {
         val map = mutableMapOf<Int, Pair<Trip, Int>>()
-        val cal = Calendar.getInstance()
 
         fun parseDate(dateStr: String): Calendar? {
-            // yyyy/MM/dd
             try {
                 val sdfFull = SimpleDateFormat("yyyy/MM/dd", Locale.getDefault())
-                sdfFull.parse(dateStr)?.let {
-                    return Calendar.getInstance().apply { time = it }
-                }
-            } catch (e: Exception) { /* continue */ }
-
-            // MM/dd (自動補上當前年份)
+                sdfFull.parse(dateStr)?.let { return Calendar.getInstance().apply { time = it } }
+            } catch (e: Exception) { }
             try {
                 val sdfShort = SimpleDateFormat("MM/dd", Locale.getDefault())
                 sdfShort.parse(dateStr)?.let {
@@ -377,7 +380,7 @@ fun TripCalendar(trips: List<Trip>) {
                     c.set(Calendar.YEAR, currentYear)
                     return c
                 }
-            } catch (e: Exception) { /* continue */ }
+            } catch (e: Exception) { }
             return null
         }
 
@@ -387,20 +390,16 @@ fun TripCalendar(trips: List<Trip>) {
                 if (parts.size == 2) {
                     val startCal = parseDate(parts[0])
                     val endCal = parseDate(parts[1])
-
                     if (startCal != null && endCal != null) {
-                        // 強制修正：確保 start <= end
                         val (actualStart, actualEnd) = if (startCal.timeInMillis > endCal.timeInMillis) endCal to startCal else startCal to endCal
-
                         val iterCal = actualStart.clone() as Calendar
                         while (!iterCal.after(actualEnd)) {
-                            // 只標記當前年份月份的日期
                             if (iterCal.get(Calendar.YEAR) == currentYear && iterCal.get(Calendar.MONTH) == currentMonth) {
                                 val day = iterCal.get(Calendar.DAY_OF_MONTH)
                                 val pos = when {
-                                    iterCal.get(Calendar.DAY_OF_YEAR) == actualStart.get(Calendar.DAY_OF_YEAR) -> 1 // Start
-                                    iterCal.get(Calendar.DAY_OF_YEAR) == actualEnd.get(Calendar.DAY_OF_YEAR) -> 3 // End
-                                    else -> 2 // Middle
+                                    iterCal.get(Calendar.DAY_OF_YEAR) == actualStart.get(Calendar.DAY_OF_YEAR) -> 1
+                                    iterCal.get(Calendar.DAY_OF_YEAR) == actualEnd.get(Calendar.DAY_OF_YEAR) -> 3
+                                    else -> 2
                                 }
                                 map[day] = trip to pos
                             }
@@ -411,7 +410,7 @@ fun TripCalendar(trips: List<Trip>) {
             } else {
                 val singleCal = parseDate(trip.dateRange)
                 if (singleCal != null && singleCal.get(Calendar.YEAR) == currentYear && singleCal.get(Calendar.MONTH) == currentMonth) {
-                    map[singleCal.get(Calendar.DAY_OF_MONTH)] = trip to 0 // Single
+                    map[singleCal.get(Calendar.DAY_OF_MONTH)] = trip to 0
                 }
             }
         }
@@ -419,62 +418,36 @@ fun TripCalendar(trips: List<Trip>) {
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = {
-                if (currentMonth == 0) { currentMonth = 11; currentYear-- } else { currentMonth-- }
-            }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "上個月") }
-
+        Row(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { if (currentMonth == 0) { currentMonth = 11; currentYear-- } else { currentMonth-- } }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "上個月") }
             Text(monthFormat.format(baseCal.time), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFF008080))
-
-            IconButton(onClick = {
-                if (currentMonth == 11) { currentMonth = 0; currentYear++ } else { currentMonth++ }
-            }) { Icon(Icons.Default.ArrowForward, "下個月") }
+            IconButton(onClick = { if (currentMonth == 11) { currentMonth = 0; currentYear++ } else { currentMonth++ } }) { Icon(Icons.Default.ArrowForward, "下個月") }
         }
-
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
-            listOf("日", "一", "二", "三", "四", "五", "六").forEach {
-                Text(it, fontWeight = FontWeight.Bold, color = Color.Gray)
-            }
+            listOf("日", "一", "二", "三", "四", "五", "六").forEach { Text(it, fontWeight = FontWeight.Bold, color = Color.Gray) }
         }
-
         Spacer(Modifier.height(8.dp))
-
         LazyVerticalGrid(columns = GridCells.Fixed(7), modifier = Modifier.fillMaxSize()) {
             items(firstDayOfWeek - 1) { Box(Modifier.size(40.dp)) }
-
             items(daysInMonth) { index ->
                 val day = index + 1
                 val tripInfo = tripMap[day]
                 val trip = tripInfo?.first
                 val pos = tripInfo?.second ?: -1
-
-                // 定義背景形狀：
                 val bgShape = when (pos) {
-                    0 -> CircleShape // 單日
-                    1 -> RoundedCornerShape(topStart = 50.dp, bottomStart = 50.dp) // 開始 (左圓)
-                    3 -> RoundedCornerShape(topEnd = 50.dp, bottomEnd = 50.dp) // 結束 (右圓)
-                    2 -> RectangleShape // 中間 (方形)
+                    0 -> CircleShape
+                    1 -> RoundedCornerShape(topStart = 50.dp, bottomStart = 50.dp)
+                    3 -> RoundedCornerShape(topEnd = 50.dp, bottomEnd = 50.dp)
+                    2 -> RectangleShape
                     else -> RectangleShape
                 }
-
                 Box(
-                    modifier = Modifier
-                        .padding(vertical = 2.dp) // 上下留白，左右連貫
-                        .aspectRatio(1f)
-                        .clip(bgShape)
+                    modifier = Modifier.padding(vertical = 2.dp).aspectRatio(1f).clip(bgShape)
                         .background(if (trip != null) Color(0xFF008080).copy(alpha = if(pos==2) 0.15f else 0.3f) else Color.Transparent),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "$day",
-                            fontWeight = if (trip != null) FontWeight.Bold else FontWeight.Normal,
-                            color = if (trip != null) Color(0xFF008080) else MaterialTheme.colorScheme.onSurface
-                        )
+                        Text(text = "$day", fontWeight = if (trip != null) FontWeight.Bold else FontWeight.Normal, color = if (trip != null) Color(0xFF008080) else MaterialTheme.colorScheme.onSurface)
                     }
                 }
             }
@@ -482,221 +455,7 @@ fun TripCalendar(trips: List<Trip>) {
     }
 }
 
-// ---------------------- 舊有元件 ----------------------
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun TripSettingsDialog(
-    title: String,
-    initialTrip: Trip? = null,
-    onDismiss: () -> Unit,
-    onConfirm: (String, String, String) -> Unit
-) {
-    var name by remember { mutableStateOf(initialTrip?.name ?: "") }
-    var selectedIcon by remember { mutableStateOf(initialTrip?.icon ?: "✈️") }
-
-    val initialDates = initialTrip?.dateRange?.split(" ~ ")
-    var startDate by remember { mutableStateOf(initialDates?.getOrNull(0) ?: "") }
-    var endDate by remember { mutableStateOf(initialDates?.getOrNull(1) ?: "") }
-
-    var showStartPicker by remember { mutableStateOf(false) }
-    var showEndPicker by remember { mutableStateOf(false) }
-
-    val icons = listOf("✈️", "🧳", "🏝️", "🏔️", "🏕️", "🏙️", "🚂", "🚗", "🚢", "🎡", "🎢", "📷", "🛍️", "🍜", "🍻")
-
-    if (showStartPicker) {
-        val datePickerState = rememberDatePickerState()
-        DatePickerDialog(
-            onDismissRequest = { showStartPicker = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    datePickerState.selectedDateMillis?.let {
-                        startDate = SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()).format(Date(it))
-                    }
-                    showStartPicker = false
-                }) { Text("確定") }
-            }
-        ) { DatePicker(state = datePickerState) }
-    }
-
-    if (showEndPicker) {
-        val datePickerState = rememberDatePickerState()
-        DatePickerDialog(
-            onDismissRequest = { showEndPicker = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    datePickerState.selectedDateMillis?.let {
-                        endDate = SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()).format(Date(it))
-                    }
-                    showEndPicker = false
-                }) { Text("確定") }
-            }
-        ) { DatePicker(state = datePickerState) }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, fontWeight = FontWeight.Bold) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("🌍 選擇圖示", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(icons) { icon ->
-                        Box(
-                            modifier = Modifier
-                                .size(45.dp)
-                                .background(if (selectedIcon == icon) Color(0xFF008080).copy(0.2f) else Color.DarkGray.copy(0.3f), RoundedCornerShape(8.dp))
-                                .border(if (selectedIcon == icon) 2.dp else 0.dp, if (selectedIcon == icon) Color(0xFF008080) else Color.Transparent, RoundedCornerShape(8.dp))
-                                .clickable { selectedIcon = icon },
-                            contentAlignment = Alignment.Center
-                        ) { Text(icon, fontSize = 24.sp) }
-                    }
-                }
-                Text("📝 旅程名稱", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    placeholder = { Text("請輸入旅程...", color = Color.Gray) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Text("📅 旅遊日期區間 (選填)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = startDate,
-                        onValueChange = {},
-                        readOnly = true,
-                        enabled = false,
-                        placeholder = { Text("開始日期", color = Color.Gray) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { showStartPicker = true },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            disabledTextColor = MaterialTheme.colorScheme.onSurface,
-                            disabledBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-                    OutlinedTextField(
-                        value = endDate,
-                        onValueChange = {},
-                        readOnly = true,
-                        enabled = false,
-                        placeholder = { Text("結束日期", color = Color.Gray) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { showEndPicker = true },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            disabledTextColor = MaterialTheme.colorScheme.onSurface,
-                            disabledBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = {
-                if (name.isNotBlank()) {
-                    var finalStart = startDate
-                    var finalEnd = endDate
-                    // 自動對調防呆
-                    if (startDate.isNotBlank() && endDate.isNotBlank() && startDate > endDate) {
-                        finalStart = endDate
-                        finalEnd = startDate
-                    }
-                    val finalRange = if (finalStart.isNotBlank() && finalEnd.isNotBlank()) "$finalStart ~ $finalEnd" else if(finalStart.isNotBlank()) finalStart else ""
-                    onConfirm(name, selectedIcon, finalRange)
-                }
-            }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF008080))) { Text("儲存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun TripGridCard(trip: Trip, onClick: () -> Unit, onLongClick: () -> Unit, onDelete: () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth().height(160.dp).combinedClickable(onClick = onClick, onLongClick = onLongClick),
-        shape = RoundedCornerShape(15.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(2.dp)
-    ) {
-        Box {
-            Column(modifier = Modifier.fillMaxSize().padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                Text(trip.icon, fontSize = 48.sp)
-                Spacer(Modifier.height(8.dp))
-                Text(trip.name, fontWeight = FontWeight.Bold, fontSize = 16.sp, textAlign = TextAlign.Center, maxLines = 1)
-                if (trip.dateRange.isNotEmpty()) Text(trip.dateRange, fontSize = 10.sp, color = Color.Gray)
-            }
-            IconButton(onClick = onDelete, modifier = Modifier.align(Alignment.TopEnd).size(32.dp)) {
-                Icon(Icons.Default.Delete, null, tint = Color.LightGray, modifier = Modifier.size(16.dp))
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    var hasCameraPermission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
-    val isProcessing = remember { AtomicBoolean(false) }
-
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasCameraPermission = it }
-    LaunchedEffect(Unit) { if (!hasCameraPermission) launcher.launch(Manifest.permission.CAMERA) }
-    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        uri?.let {
-            val inputStream = context.contentResolver.openInputStream(it)
-            val bitmap = BitmapFactory.decodeStream(inputStream)
-            val image = InputImage.fromBitmap(bitmap, 0)
-            BarcodeScanning.getClient().process(image).addOnSuccessListener { barcodes ->
-                barcodes.firstOrNull()?.rawValue?.let { result -> onResult(result) } ?: Toast.makeText(context, "未發現 QR Code", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-    Scaffold(topBar = { TopAppBar(title = { Text("掃描行程 QR Code") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } }) }) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding), horizontalAlignment = Alignment.CenterHorizontally) {
-            if (hasCameraPermission) {
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    AndroidView(factory = { ctx ->
-                        val previewView = PreviewView(ctx)
-                        ProcessCameraProvider.getInstance(ctx).addListener({
-                            val cameraProvider = cameraProviderFutureGet(ProcessCameraProvider.getInstance(ctx))
-                            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-                            val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build().also {
-                                it.setAnalyzer(Executors.newSingleThreadExecutor()) { proxy ->
-                                    if (isProcessing.get()) { proxy.close(); return@setAnalyzer }
-                                    proxy.image?.let { img ->
-                                        BarcodeScanning.getClient().process(InputImage.fromMediaImage(img, proxy.imageInfo.rotationDegrees))
-                                            .addOnSuccessListener { codes ->
-                                                val rawValue = codes.firstOrNull()?.rawValue
-                                                if (rawValue != null && !isProcessing.getAndSet(true)) {
-                                                    Handler(Looper.getMainLooper()).post {
-                                                        try { cameraProvider.unbindAll(); onResult(rawValue) } catch (e: Exception) { e.printStackTrace() }
-                                                    }
-                                                }
-                                            }
-                                            .addOnCompleteListener { proxy.close() }
-                                    } ?: proxy.close()
-                                }
-                            }
-                            try { cameraProvider.unbindAll(); cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis) } catch (e: Exception) { e.printStackTrace() }
-                        }, ContextCompat.getMainExecutor(ctx))
-                        previewView
-                    }, modifier = Modifier.fillMaxSize())
-                    Box(Modifier.size(250.dp).border(2.dp, Color.White, RoundedCornerShape(12.dp)).align(Alignment.Center))
-                }
-            }
-            Button(onClick = { galleryLauncher.launch("image/*") }, Modifier.padding(16.dp).fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF008080))) {
-                Icon(Icons.Default.PhotoLibrary, null); Spacer(Modifier.width(8.dp)); Text("從相簿選擇圖片")
-            }
-        }
-    }
-}
-
-private fun cameraProviderFutureGet(future: com.google.common.util.concurrent.ListenableFuture<ProcessCameraProvider>): ProcessCameraProvider = future.get()
+// ---------------------- 行程頁面 (含記帳儀表板) ----------------------
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -718,6 +477,11 @@ fun ItineraryScreen(
     var showFavoritesOnly by remember { mutableStateOf(false) }
     var editingItem by remember { mutableStateOf<ItineraryItem?>(null) }
 
+    // 計算預算資訊
+    val totalSpent = tripItineraries.sumOf { it.cost }
+    val remainingBudget = trip.budget - totalSpent
+    val budgetProgress = if (trip.budget > 0) (totalSpent / trip.budget).toFloat().coerceIn(0f, 1f) else 0f
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -733,10 +497,30 @@ fun ItineraryScreen(
         }
     ) { innerPadding ->
         Column(modifier = Modifier.padding(innerPadding)) {
-            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(if (showFavoritesOnly) "❤️ 我的最愛" else "📅 行程列表", fontWeight = FontWeight.Bold, color = if (showFavoritesOnly) Color.Red else Color.DarkGray)
-                Switch(checked = showFavoritesOnly, onCheckedChange = { showFavoritesOnly = it }, modifier = Modifier.scale(0.7f), colors = SwitchDefaults.colors(checkedThumbColor = Color.Red))
+            // --- 預算儀表板 ---
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFE0F2F1)),
+                elevation = CardDefaults.cardElevation(2.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("總預算: $${trip.budget.toInt()}", fontWeight = FontWeight.Bold, color = Color(0xFF00695C))
+                        Text("剩餘: $${remainingBudget.toInt()}", fontWeight = FontWeight.Bold, color = if (remainingBudget >= 0) Color(0xFF00695C) else Color.Red)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { budgetProgress },
+                        modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                        color = if (budgetProgress > 0.9f) Color.Red else Color(0xFF008080),
+                        trackColor = Color.White
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text("已支出: $${totalSpent.toInt()}", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.align(Alignment.End))
+                }
             }
+
+            // 日期過濾器
             if (uniqueDates.isNotEmpty() && !showFavoritesOnly) {
                 LazyRow(Modifier.padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(uniqueDates) { date ->
@@ -744,6 +528,8 @@ fun ItineraryScreen(
                     }
                 }
             }
+
+            // 列表
             val displayItems = if (showFavoritesOnly) tripItineraries.filter { it.isFavorite }.sortedBy { it.date + it.time } else tripItineraries.filter { it.date == selectedDate }.sortedBy { it.time }
             if (displayItems.isEmpty()) { Box(Modifier.fillMaxSize(), Alignment.Center) { Text("目前沒有行程喔！", color = Color.Gray) } }
             else {
@@ -800,6 +586,9 @@ fun AddItineraryDialog(
     var date by remember { mutableStateOf(initialItem?.date ?: SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(cal.time)) }
     var time by remember { mutableStateOf(initialItem?.time ?: SimpleDateFormat("HH:mm", Locale.getDefault()).format(cal.time)) }
     var desc by remember { mutableStateOf(initialItem?.description ?: "") }
+    // 新增：花費輸入
+    var costStr by remember { mutableStateOf(if (initialItem != null && initialItem.cost != 0.0) initialItem.cost.toInt().toString() else "") }
+
     var selectedCat by remember {
         mutableStateOf(
             if (initialItem != null) Category.entries.find { it.name == initialItem.category } ?: Category.SPOT
@@ -840,27 +629,269 @@ fun AddItineraryDialog(
                     }
                 }
                 OutlinedTextField(desc, { desc = it }, label = { Text("內容") }, modifier = Modifier.fillMaxWidth())
+
+                // 新增：花費輸入框
+                OutlinedTextField(
+                    value = costStr,
+                    onValueChange = { if (it.all { char -> char.isDigit() }) costStr = it },
+                    label = { Text("花費 ($)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
             }
         },
         confirmButton = {
             Button(
-                onClick = { if (desc.isNotBlank()) onConfirm(ItineraryItem(tripId = tripId, date = date, time = time, description = desc, category = selectedCat.name)) },
+                onClick = {
+                    if (desc.isNotBlank()) {
+                        val cost = costStr.toDoubleOrNull() ?: 0.0
+                        onConfirm(ItineraryItem(
+                            tripId = tripId,
+                            date = date,
+                            time = time,
+                            description = desc,
+                            category = selectedCat.name,
+                            cost = cost
+                        ))
+                    }
+                },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF008080))
             ) { Text("確認") }
         }
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TimelineItem(
-    item: ItineraryItem,
-    onToggleFavorite: () -> Unit,
-    onDelete: () -> Unit,
-    onEdit: () -> Unit
+fun TripSettingsDialog(
+    title: String,
+    initialTrip: Trip? = null,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String, String, Double) -> Unit
 ) {
+    var name by remember { mutableStateOf(initialTrip?.name ?: "") }
+    var selectedIcon by remember { mutableStateOf(initialTrip?.icon ?: "✈️") }
+    // 新增：預算輸入
+    var budgetStr by remember { mutableStateOf(if (initialTrip != null && initialTrip.budget != 0.0) initialTrip.budget.toInt().toString() else "") }
+
+    val initialDates = initialTrip?.dateRange?.split(" ~ ")
+    var startDate by remember { mutableStateOf(initialDates?.getOrNull(0) ?: "") }
+    var endDate by remember { mutableStateOf(initialDates?.getOrNull(1) ?: "") }
+
+    var showStartPicker by remember { mutableStateOf(false) }
+    var showEndPicker by remember { mutableStateOf(false) }
+
+    val icons = listOf("✈️", "🧳", "🏝️", "🏔️", "🏕️", "🏙️", "🚂", "🚗", "🚢", "🎡", "🎢", "📷", "🛍️", "🍜", "🍻")
+
+    if (showStartPicker) {
+        val datePickerState = rememberDatePickerState()
+        DatePickerDialog(onDismissRequest = { showStartPicker = false }, confirmButton = { TextButton(onClick = { datePickerState.selectedDateMillis?.let { startDate = SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()).format(Date(it)) }; showStartPicker = false }) { Text("確定") } }) { DatePicker(state = datePickerState) }
+    }
+
+    if (showEndPicker) {
+        val datePickerState = rememberDatePickerState()
+        DatePickerDialog(onDismissRequest = { showEndPicker = false }, confirmButton = { TextButton(onClick = { datePickerState.selectedDateMillis?.let { endDate = SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()).format(Date(it)) }; showEndPicker = false }) { Text("確定") } }) { DatePicker(state = datePickerState) }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("🌍 選擇圖示", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(icons) { icon ->
+                        Box(
+                            modifier = Modifier
+                                .size(45.dp)
+                                .background(if (selectedIcon == icon) Color(0xFF008080).copy(0.2f) else Color.DarkGray.copy(0.3f), RoundedCornerShape(8.dp))
+                                .border(if (selectedIcon == icon) 2.dp else 0.dp, if (selectedIcon == icon) Color(0xFF008080) else Color.Transparent, RoundedCornerShape(8.dp))
+                                .clickable { selectedIcon = icon },
+                            contentAlignment = Alignment.Center
+                        ) { Text(icon, fontSize = 24.sp) }
+                    }
+                }
+                Text("📝 旅程名稱", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    placeholder = { Text("請輸入旅程...", color = Color.Gray) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // 新增：預算輸入框
+                Text("💰 總預算", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                OutlinedTextField(
+                    value = budgetStr,
+                    onValueChange = { if (it.all { char -> char.isDigit() }) budgetStr = it },
+                    placeholder = { Text("例如：50000", color = Color.Gray) },
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+
+                Text("📅 旅遊日期區間 (選填)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = startDate,
+                        onValueChange = {},
+                        readOnly = true,
+                        enabled = false,
+                        placeholder = { Text("開始日期", color = Color.Gray) },
+                        modifier = Modifier.weight(1f).clickable { showStartPicker = true },
+                        colors = OutlinedTextFieldDefaults.colors(disabledTextColor = MaterialTheme.colorScheme.onSurface, disabledBorderColor = MaterialTheme.colorScheme.outline)
+                    )
+                    OutlinedTextField(
+                        value = endDate,
+                        onValueChange = {},
+                        readOnly = true,
+                        enabled = false,
+                        placeholder = { Text("結束日期", color = Color.Gray) },
+                        modifier = Modifier.weight(1f).clickable { showEndPicker = true },
+                        colors = OutlinedTextFieldDefaults.colors(disabledTextColor = MaterialTheme.colorScheme.onSurface, disabledBorderColor = MaterialTheme.colorScheme.outline)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                if (name.isNotBlank()) {
+                    var finalStart = startDate
+                    var finalEnd = endDate
+                    if (startDate.isNotBlank() && endDate.isNotBlank() && startDate > endDate) { finalStart = endDate; finalEnd = startDate }
+                    val finalRange = if (finalStart.isNotBlank() && finalEnd.isNotBlank()) "$finalStart ~ $finalEnd" else if(finalStart.isNotBlank()) finalStart else ""
+                    val budget = budgetStr.toDoubleOrNull() ?: 0.0
+                    onConfirm(name, selectedIcon, finalRange, budget)
+                }
+            }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF008080))) { Text("儲存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun TripGridCard(trip: Trip, onClick: () -> Unit, onLongClick: () -> Unit, onDelete: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth().height(160.dp).combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        shape = RoundedCornerShape(15.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(2.dp)
+    ) {
+        Box {
+            Column(modifier = Modifier.fillMaxSize().padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Text(trip.icon, fontSize = 48.sp)
+                Spacer(Modifier.height(8.dp))
+                Text(trip.name, fontWeight = FontWeight.Bold, fontSize = 16.sp, textAlign = TextAlign.Center, maxLines = 1)
+                if (trip.dateRange.isNotEmpty()) Text(trip.dateRange, fontSize = 10.sp, color = Color.Gray)
+                if (trip.budget > 0) {
+                    Spacer(Modifier.height(4.dp))
+                    Text("預算: $${trip.budget.toInt()}", fontSize = 10.sp, color = Color(0xFF00695C))
+                }
+            }
+            IconButton(onClick = onDelete, modifier = Modifier.align(Alignment.TopEnd).size(32.dp)) {
+                Icon(Icons.Default.Delete, null, tint = Color.LightGray, modifier = Modifier.size(16.dp))
+            }
+        }
+    }
+}
+
+// ---------------------- 修正: 加入被遺漏的 ScannerScreen ----------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ScannerScreen(onResult: (String) -> Unit, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var hasCameraPermission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
+
+    // 使用 AtomicBoolean 防止重複掃描
+    val isProcessing = remember { AtomicBoolean(false) }
+
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasCameraPermission = it }
+    LaunchedEffect(Unit) { if (!hasCameraPermission) launcher.launch(Manifest.permission.CAMERA) }
+
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        uri?.let {
+            val inputStream = context.contentResolver.openInputStream(it)
+            val bitmap = BitmapFactory.decodeStream(inputStream)
+            val image = InputImage.fromBitmap(bitmap, 0)
+            BarcodeScanning.getClient().process(image).addOnSuccessListener { barcodes ->
+                barcodes.firstOrNull()?.rawValue?.let { result -> onResult(result) } ?: Toast.makeText(context, "未發現 QR Code", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    Scaffold(topBar = { TopAppBar(title = { Text("掃描行程 QR Code") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } }) }) { padding ->
+        Column(modifier = Modifier.fillMaxSize().padding(padding), horizontalAlignment = Alignment.CenterHorizontally) {
+            if (hasCameraPermission) {
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    AndroidView(factory = { ctx ->
+                        val previewView = PreviewView(ctx)
+                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+
+                        cameraProviderFuture.addListener({
+                            val cameraProvider = cameraProviderFuture.get()
+                            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+
+                            val analysis = ImageAnalysis.Builder()
+                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                .build()
+                                .also {
+                                    it.setAnalyzer(Executors.newSingleThreadExecutor()) { proxy ->
+                                        if (isProcessing.get()) {
+                                            proxy.close()
+                                            return@setAnalyzer
+                                        }
+
+                                        proxy.image?.let { img ->
+                                            BarcodeScanning.getClient().process(InputImage.fromMediaImage(img, proxy.imageInfo.rotationDegrees))
+                                                .addOnSuccessListener { codes ->
+                                                    val rawValue = codes.firstOrNull()?.rawValue
+                                                    if (rawValue != null && !isProcessing.getAndSet(true)) {
+                                                        Handler(Looper.getMainLooper()).post {
+                                                            try {
+                                                                cameraProvider.unbindAll()
+                                                                onResult(rawValue)
+                                                            } catch (e: Exception) {
+                                                                e.printStackTrace()
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                .addOnCompleteListener { proxy.close() }
+                                        } ?: proxy.close()
+                                    }
+                                }
+
+                            try {
+                                cameraProvider.unbindAll()
+                                cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                            } catch (e: Exception) { e.printStackTrace() }
+                        }, ContextCompat.getMainExecutor(ctx))
+
+                        previewView
+                    }, modifier = Modifier.fillMaxSize())
+                    Box(Modifier.size(250.dp).border(2.dp, Color.White, RoundedCornerShape(12.dp)).align(Alignment.Center))
+                }
+            }
+            Button(onClick = { galleryLauncher.launch("image/*") }, Modifier.padding(16.dp).fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF008080))) {
+                Icon(Icons.Default.PhotoLibrary, null); Spacer(Modifier.width(8.dp)); Text("從相簿選擇圖片")
+            }
+        }
+    }
+}
+
+private fun cameraProviderFutureGet(future: com.google.common.util.concurrent.ListenableFuture<ProcessCameraProvider>): ProcessCameraProvider = future.get()
+
+// ---------------------- 修正: TimelineItem 參數錯誤 ----------------------
+
+@Composable
+fun TimelineItem(item: ItineraryItem, onToggleFavorite: () -> Unit, onDelete: () -> Unit, onEdit: () -> Unit) {
     val context = LocalContext.current
     val cat = Category.entries.find { it.name == item.category } ?: Category.OTHER
 
+    // 修正重點：使用具名參數 verticalAlignment，避免與 horizontalArrangement 混淆
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -877,22 +908,18 @@ fun TimelineItem(
             colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surface),
             elevation = CardDefaults.cardElevation(1.dp)
         ) {
-            Row(
-                modifier = Modifier.padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Surface(color = cat.color, shape = RoundedCornerShape(12.dp)) { Text("${cat.icon} ${cat.label}", color = Color.White, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)) }
                     Spacer(Modifier.height(4.dp))
-                    Text(
-                        item.description,
-                        fontWeight = FontWeight.Medium,
-                        fontSize = 16.sp,
-                        modifier = Modifier.clickable {
-                            val uri = Uri.parse("geo:0,0?q=${item.description}")
-                            ContextCompat.startActivity(context, Intent(Intent.ACTION_VIEW, uri), null)
-                        }
-                    )
+                    Text(item.description, fontWeight = FontWeight.Medium, fontSize = 16.sp, modifier = Modifier.clickable {
+                        val uri = Uri.parse("geo:0,0?q=${item.description}")
+                        ContextCompat.startActivity(context, Intent(Intent.ACTION_VIEW, uri), null)
+                    })
+                    // 顯示花費
+                    if (item.cost > 0) {
+                        Text("💰 $${item.cost.toInt()}", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(top = 4.dp))
+                    }
                 }
                 IconButton(onToggleFavorite) { Icon(if (item.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, null, tint = if (item.isFavorite) Color.Red else Color.LightGray) }
                 IconButton(onClick = onEdit) { Icon(Icons.Default.Edit, null, tint = Color.Gray, modifier = Modifier.size(20.dp)) }
